@@ -62,7 +62,7 @@ export class RedisRbacStack extends cdk.Stack {
         {
           cidrMask: 24,
           name: 'Isolated',
-          subnetType: ec2.SubnetType.ISOLATED,
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
         }
       ]
     });
@@ -77,6 +77,28 @@ export class RedisRbacStack extends cdk.Stack {
       allowAllOutbound: false
     });
 
+    const rotatorSecurityGroup = new ec2.SecurityGroup(this, "RotatorSG", {
+      vpc: vpc,
+      description: "SecurityGroup for rotator function",
+    });
+
+    rotatorSecurityGroup.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.allTraffic(),
+      "All port inbound"
+    );
+
+    const elasticacheVpcEndpoint = new ec2.InterfaceVpcEndpoint(this, 'ElastiCache VPC Endpoint', {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService('com.amazonaws.'+cdk.Stack.of(this).region+'.elasticache', 443),
+      privateDnsEnabled: true,
+      open: true,
+      subnets: {
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+      },
+      securityGroups:[rotatorSecurityGroup]
+    });
+
     const secretsManagerVpcEndpointSecurityGroup = new ec2.SecurityGroup(this, 'SecretsManagerVPCeSG', {
       vpc: vpc,
       description: 'SecurityGroup for the VPC Endpoint Secrets Manager',
@@ -89,7 +111,7 @@ export class RedisRbacStack extends cdk.Stack {
     const secretsManagerEndpoint = vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
       subnets: {
-        subnetType: ec2.SubnetType.ISOLATED
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED
       },
       open: false,
       securityGroups: [secretsManagerVpcEndpointSecurityGroup]
@@ -245,7 +267,7 @@ export class RedisRbacStack extends cdk.Stack {
       layers: [redisPyLayer],
       role: producerRole,
       vpc: vpc,
-      vpcSubnets: {subnetType: ec2.SubnetType.ISOLATED},
+      vpcSubnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
       securityGroups: [lambdaSecurityGroup],
       environment: {
         redis_endpoint: ecClusterReplicationGroup.attrPrimaryEndPointAddress,
@@ -267,7 +289,7 @@ export class RedisRbacStack extends cdk.Stack {
       layers: [redisPyLayer],
       role: consumerRole,
       vpc: vpc,
-      vpcSubnets: {subnetType: ec2.SubnetType.ISOLATED},
+      vpcSubnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
       securityGroups: [lambdaSecurityGroup],
       environment: {
         redis_endpoint: ecClusterReplicationGroup.attrPrimaryEndPointAddress,
@@ -289,7 +311,7 @@ export class RedisRbacStack extends cdk.Stack {
       layers: [redisPyLayer],
       role: consumerRole,
       vpc: vpc,
-      vpcSubnets: {subnetType: ec2.SubnetType.ISOLATED},
+      vpcSubnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
       securityGroups: [lambdaSecurityGroup],
       environment: {
         redis_endpoint: ecClusterReplicationGroup.attrPrimaryEndPointAddress,

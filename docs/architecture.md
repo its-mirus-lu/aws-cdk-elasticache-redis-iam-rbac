@@ -63,7 +63,7 @@ const vpc = new ec2.Vpc(this, "Vpc", {
         {
           cidrMask: 24,
           name: 'Isolated',
-          subnetType: ec2.SubnetType.ISOLATED,
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
         }
       ]
     });
@@ -71,7 +71,7 @@ const vpc = new ec2.Vpc(this, "Vpc", {
     const secretsManagerEndpoint = vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
       subnets: {
-        subnetType: ec2.SubnetType.ISOLATED
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED
       }
     });
 
