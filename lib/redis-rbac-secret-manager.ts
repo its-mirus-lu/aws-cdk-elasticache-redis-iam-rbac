@@ -20,18 +20,32 @@ import * as cdk from 'aws-cdk-lib';
 import { 
   aws_kms as kms, 
   aws_iam as iam, 
+  aws_ec2 as ec2,
+  aws_lambda as lambda,
   aws_elasticache as elasticache, 
-  aws_secretsmanager as secretsmanager} from 'aws-cdk-lib';
+  aws_secretsmanager as secretsmanager,
+  Duration} from 'aws-cdk-lib';
 import { Construct } from 'constructs';
+import path = require('path');
 
 export interface RedisRbacUserProps {
   redisUserName: string;
   redisUserId: string;
   accessString?: string;
   kmsKey?: kms.Key;
-  principals?: iam.IPrincipal[]
+  principals?: iam.IPrincipal[];
+  redisRbacRotatorProps?: RedisRbacRotatorProps
 }
 
+export interface RedisRbacRotatorProps {
+  vpc: ec2.Vpc;
+  subnets: [ec2.Subnet]
+  securityGroups: [ec2.SecurityGroup];
+  rotationSchedule: Duration;
+  elasticacheReplicationGroup: elasticache.CfnReplicationGroup;
+  redisPyLayer?: lambda.LayerVersion;
+  rotatorRole?: iam.Role
+}
 
 export class RedisRbacUser extends Construct {
   public readonly response: string;
@@ -116,6 +130,72 @@ export class RedisRbacUser extends Construct {
       });
     }
 
+    if(props.redisRbacRotatorProps){
+
+      var redisPyLayer: lambda.LayerVersion;
+
+      if(props.redisRbacRotatorProps.redisPyLayer){
+        redisPyLayer = props.redisRbacRotatorProps.redisPyLayer
+      } else {
+        redisPyLayer = Singleton.getInstance(scope)
+      }
+
+      const rotatorFunction = new lambda.Function(this, 'function', {
+        runtime: lambda.Runtime.PYTHON_3_7,
+        handler: 'lambda_handler.lambda_handler',
+        code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/lambda_rotator')),
+        layers: [redisPyLayer],
+        role: props.redisRbacRotatorProps.rotatorRole,
+        timeout: cdk.Duration.seconds(30),
+        vpc: props.redisRbacRotatorProps.vpc,
+        vpcSubnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
+        securityGroups: props.redisRbacRotatorProps.securityGroups,
+        environment: {
+          replicationGroupId: props.redisRbacRotatorProps.elasticacheReplicationGroup.ref,
+          redis_endpoint: props.redisRbacRotatorProps.elasticacheReplicationGroup.attrPrimaryEndPointAddress,
+          redis_port: props.redisRbacRotatorProps.elasticacheReplicationGroup.attrPrimaryEndPointPort,
+          EXCLUDE_CHARACTERS: '@%*()_+=`~{}|[]\\:";\'?,./',
+          SECRETS_MANAGER_ENDPOINT: "https://secretsmanager."+cdk.Stack.of(this).region+".amazonaws.com"
+        }
+      });
+  
+    }
+
+  };
+
+}
+
+class Singleton {
+  private static instance: Singleton;
+  private static layer: lambda.LayerVersion
+
+  private constructor(scope: Construct) {
+    this.createLayer(scope)
+    
   }
 
+  private createLayer(scope: Construct){
+    Singleton.layer = new lambda.LayerVersion(scope, 'redispy_Layer', {
+      code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/lib/redis_module/redis_py.zip')),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_8, lambda.Runtime.PYTHON_3_7],
+      description: 'A layer that contains the redispy module',
+      license: 'MIT License'
+    });
+    return Singleton.instance
+  }
+
+  // public static getLayer(): lambda.LayerVersion {
+  //   return instance
+  // }
+
+  
+  public static getInstance(scope: Construct): lambda.LayerVersion {
+
+    if (!Singleton.instance) {
+
+      Singleton.instance = new Singleton(scope);
+    }
+
+    return Singleton.layer;
+  }
 }
