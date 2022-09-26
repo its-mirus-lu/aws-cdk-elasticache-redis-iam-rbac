@@ -24,7 +24,8 @@ import {
   aws_iam as iam, 
   aws_elasticache as elasticache, 
   aws_lambda as lambda,
-  aws_secretsmanager as secretsmanager} from 'aws-cdk-lib';
+  aws_secretsmanager as secretsmanager,
+  Duration} from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import path = require('path');
 import { RedisRbacUser } from  "./redis-rbac-secret-manager";
@@ -137,7 +138,17 @@ export class RedisRbacStack extends cdk.Stack {
     noAccessRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"));
     noAccessRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
 
+    let isolatedSubnets: string[] = []
 
+    vpc.isolatedSubnets.forEach(function(value){
+      isolatedSubnets.push(value.subnetId)
+    });
+
+    const ecSubnetGroup = new elasticache.CfnSubnetGroup(this, 'ElastiCacheSubnetGroup', {
+      description: 'Elasticache Subnet Group',
+      subnetIds: isolatedSubnets,
+      cacheSubnetGroupName: 'RedisSubnetGroup'
+    });
     // ------------------------------------------------------------------------------------
     // Step 3) Create Redis RBAC users
     //     a) access strings will dictate operations that can be performed
@@ -154,7 +165,13 @@ export class RedisRbacStack extends cdk.Stack {
       redisUserId: producerName,
       accessString: 'on ~* -@all +SET',
       kmsKey: commonKmsKey,
-      principals: [producerRole]
+      principals: [producerRole],
+      redisRbacRotatorProps: {
+        vpc,
+        subnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
+        securityGroups: [ecSecurityGroup],
+        rotationSchedule: Duration.days(30)
+      }
     });
 
     const consumerRbacUser = new RedisRbacUser(this, consumerName+'RBAC', {
@@ -189,25 +206,11 @@ export class RedisRbacStack extends cdk.Stack {
     //     b) the ElastiCache replication group will be associated with the RBAC user group
     // ------------------------------------------------------------------------------------
 
-    let isolatedSubnets: string[] = []
-
-    vpc.isolatedSubnets.forEach(function(value){
-      isolatedSubnets.push(value.subnetId)
-    });
-
-    const ecSubnetGroup = new elasticache.CfnSubnetGroup(this, 'ElastiCacheSubnetGroup', {
-      description: 'Elasticache Subnet Group',
-      subnetIds: isolatedSubnets,
-      cacheSubnetGroupName: 'RedisSubnetGroup'
-    });
 
     const elastiCacheKmsKey = new kms.Key(this, 'kmsForSecret', {
       alias: 'redisReplicationGroup/'+elasticacheReplicationGroupName,
       enableKeyRotation: true
     });
-
-    // elastiCacheKmsKey.grantEncrypt(producerRole);
-    // elastiCacheKmsKey.grantDecrypt(consumerRole);
 
     const ecClusterReplicationGroup = new elasticache.CfnReplicationGroup(this, elasticacheReplicationGroupName, {
       replicationGroupDescription: 'RedisReplicationGroup-RBAC-Demo',

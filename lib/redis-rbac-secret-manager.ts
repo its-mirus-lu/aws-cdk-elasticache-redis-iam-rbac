@@ -25,6 +25,7 @@ import {
   aws_elasticache as elasticache, 
   aws_secretsmanager as secretsmanager,
   Duration} from 'aws-cdk-lib';
+import { ISubnet } from 'aws-cdk-lib/aws-ec2';
 import { Construct } from 'constructs';
 import path = require('path');
 
@@ -39,10 +40,10 @@ export interface RedisRbacUserProps {
 
 export interface RedisRbacRotatorProps {
   vpc: ec2.Vpc;
-  subnets: [ec2.Subnet]
+  subnets: ec2.SubnetSelection
   securityGroups: [ec2.SecurityGroup];
   rotationSchedule: Duration;
-  elasticacheReplicationGroup: elasticache.CfnReplicationGroup;
+  elasticacheReplicationGroup?: elasticache.CfnReplicationGroup;
   redisPyLayer?: lambda.LayerVersion;
   rotatorRole?: iam.Role
 }
@@ -133,34 +134,85 @@ export class RedisRbacUser extends Construct {
     if(props.redisRbacRotatorProps){
 
       var redisPyLayer: lambda.LayerVersion;
+      var rotatorRole: iam.Role;
 
-      if(props.redisRbacRotatorProps.redisPyLayer){
-        redisPyLayer = props.redisRbacRotatorProps.redisPyLayer
-      } else {
-        redisPyLayer = Singleton.getInstance(scope)
+      // if(props.redisRbacRotatorProps.redisPyLayer){
+      //   redisPyLayer = props.redisRbacRotatorProps.redisPyLayer
+      // } else {
+      //   redisPyLayer = Singleton.getInstance(scope)
+      // }
+
+      // if(props.redisRbacRotatorProps.rotatorRole){
+      //   rotatorRole = props.redisRbacRotatorProps.rotatorRole
+      // } else {
+      rotatorRole = new iam.Role(this, this.rbacUserName+"_secret_rotator_role", {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        description: 'Role to be assumed by secret rotator function for '+this.rbacUserName,
+      })
+      rotatorRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"));
+      rotatorRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
+      rotatorRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          resources: [this.rbacUserSecret.secretArn],
+          actions: [
+            "secretsmanager:DescribeSecret",
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:PutSecretValue",
+            "secretsmanager:UpdateSecretVersionStage",
+          ]
+        })
+      );
+      rotatorRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          resources: ["*"],
+          actions: [
+            "secretsmanager:GetRandomPassword"
+          ]
+        })
+      );
+      rotatorRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          resources: ["arn:aws:elasticache:"+cdk.Stack.of(this).region+":"+cdk.Stack.of(this).account+":user:"+this.rbacUserId],
+          actions: [
+            "elasticache:DescribeUsers",
+            "elasticache:ModifyUser"
+          ]
+        })
+      );
       }
 
       const rotatorFunction = new lambda.Function(this, 'function', {
         runtime: lambda.Runtime.PYTHON_3_7,
         handler: 'lambda_handler.lambda_handler',
-        code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/lambda_rotator')),
-        layers: [redisPyLayer],
-        role: props.redisRbacRotatorProps.rotatorRole,
+        code: lambda.Code.fromAsset(path.join(__dirname, 'lambda_rotator_rbac_user')),
+        // layers: [redisPyLayer],
+        role: rotatorRole,
         timeout: cdk.Duration.seconds(30),
         vpc: props.redisRbacRotatorProps.vpc,
         vpcSubnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
         securityGroups: props.redisRbacRotatorProps.securityGroups,
         environment: {
-          replicationGroupId: props.redisRbacRotatorProps.elasticacheReplicationGroup.ref,
-          redis_endpoint: props.redisRbacRotatorProps.elasticacheReplicationGroup.attrPrimaryEndPointAddress,
-          redis_port: props.redisRbacRotatorProps.elasticacheReplicationGroup.attrPrimaryEndPointPort,
+          // replicationGroupId: props.redisRbacRotatorProps.elasticacheReplicationGroup.ref,
+          // redis_endpoint: props.redisRbacRotatorProps.elasticacheReplicationGroup.attrPrimaryEndPointAddress,
+          // redis_port: props.redisRbacRotatorProps.elasticacheReplicationGroup.attrPrimaryEndPointPort,
           EXCLUDE_CHARACTERS: '@%*()_+=`~{}|[]\\:";\'?,./',
-          SECRETS_MANAGER_ENDPOINT: "https://secretsmanager."+cdk.Stack.of(this).region+".amazonaws.com"
+          SECRETS_MANAGER_ENDPOINT: "https://secretsmanager."+cdk.Stack.of(this).region+".amazonaws.com",
+          SECRET_ARN: this.rbacUserSecret.secretArn,
+          USER_NAME: this.rbacUserName
         }
       });
+
+      this.rbacUserSecret.addRotationSchedule(this.rbacUserName+"_rotation_schedule", {
+        rotationLambda: rotatorFunction,
+        automaticallyAfter: props.redisRbacRotatorProps.rotationSchedule, 
+      })
   
     }
 
+    
   };
 
 }
