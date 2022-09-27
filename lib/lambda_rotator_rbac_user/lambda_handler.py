@@ -12,6 +12,7 @@ logger.setLevel(logging.INFO)
  
  
 def lambda_handler(event, context):
+    logger.info(json.dumps(event, indent=4))
     """Secrets Manager Elasticache User Handler
  
     This handler rotates ElastiCache user password. Once executed it creates a new version of
@@ -54,14 +55,17 @@ def lambda_handler(event, context):
         raise ValueError("Secret %s is not allowed to use this Lambda function for rotation" % secret_arn)
  
     # Setup the clients
+    logger.info("a")
     secrets_manager_service_client = boto3.client('secretsmanager', endpoint_url=os.environ['SECRETS_MANAGER_ENDPOINT'])
- 
+    logger.info("b")
     # Make sure the version is staged correctly
     metadata = secrets_manager_service_client.describe_secret(SecretId=secret_arn)
+    logger.info("c")
     if not metadata['RotationEnabled']:
         logger.error("Secret %s is not enabled for rotation" % secret_arn)
         raise ValueError("Secret %s is not enabled for rotation" % secret_arn)
     versions = metadata['VersionIdsToStages']
+    logger.info("d")
     if token not in versions:
         logger.error("Secret version %s has no stage for rotation of secret %s." % (token, secret_arn))
         raise ValueError("Secret version %s has no stage for rotation of secret %s." % (token, secret_arn))
@@ -102,34 +106,47 @@ def create_secret(secrets_manager_service_client, secret_arn, token):
         ResourceNotFoundException: If the secret with the specified arn and stage does not exist
  
     """
+    
     # Make sure the current secret exists
     current_secret = get_secret_dict(secrets_manager_service_client, secret_arn, "AWSCURRENT")
- 
+    
     # Verify if the username stored in environment variable is the same with the one stored in current_secret
+    logger.info("cs: a")
     verify_user_name(current_secret)
- 
+    
+    logger.info("cs: b")
     user_context = resource_arn_to_context(current_secret["user_arn"])
-    elasticache_service_client = boto3.client('elasticache', region_name=user_context["region"])
+    
+    logger.info("cs: c")
+    elasticache_service_client = boto3.client('elasticache', endpoint_url=os.environ['ELASTICACHE_ENDPOINT'])
  
     # validates if user exists
+    logger.info("cs: d")
     elasticache_service_client.describe_users(UserId=user_context["resource"])
- 
+    
     # Now try to get the secret version, if that fails, put a new secret
     try:
+        logger.info("cs: e")
         secrets_manager_service_client.get_secret_value(SecretId=secret_arn, VersionId=token, VersionStage="AWSPENDING")
+        logger.info("cs: f")
         logger.info("createSecret: Successfully retrieved secret for %s." % secret_arn)
     except secrets_manager_service_client.exceptions.ResourceNotFoundException:
         # Get exclude characters from environment variable
+        logger.info("cs: g")
         exclude_characters = os.environ['EXCLUDE_CHARACTERS'] if 'EXCLUDE_CHARACTERS' in os.environ else '/@"\'\\'
         # Get password length from environment variable
+        logger.info("cs: h")
         password_length = int(os.environ['PASSWORD_LENGTH']) if 'PASSWORD_LENGTH' in os.environ else 20
         # Generate a random password
+        logger.info("cs: i")
         passwd = secrets_manager_service_client.get_random_password(ExcludeCharacters=exclude_characters, PasswordLength=password_length)
         current_secret['password'] = passwd['RandomPassword']
  
         # Put the secret
+        logger.info("cs: j")
         secrets_manager_service_client.put_secret_value(SecretId=secret_arn, ClientRequestToken=token, SecretString=json.dumps(current_secret),
                                                         VersionStages=['AWSPENDING'])
+        logger.info("cs: k")
         logger.info("createSecret: Successfully put secret for ARN %s and version %s." % (secret_arn, token))
  
  
@@ -163,7 +180,7 @@ def set_secret(secrets_manager_service_client, secret_arn, token):
         passwords.append(current_secret["password"])
  
     # creating elasticache client
-    elasticache_service_client = boto3.client('elasticache', region_name=user_context["region"])
+    elasticache_service_client = boto3.client('elasticache', endpoint_url=os.environ['ELASTICACHE_ENDPOINT'])
     # wait user to be in a modifiable state
     user = wait_for_user_be_active("setSecret", elasticache_service_client, user_context["resource"], secret_arn)
     # update user passwords
@@ -187,8 +204,8 @@ def test_secret(secrets_manager_service_client, secret_arn):
     """
     current_secret = get_secret_dict(secrets_manager_service_client, secret_arn, "AWSCURRENT")
     user_context = resource_arn_to_context(current_secret["user_arn"])
-    # creating elasticache client
-    elasticache_service_client = boto3.client('elasticache', region_name=user_context["region"])
+    
+    elasticache_service_client = boto3.client('elasticache', endpoint_url=os.environ['ELASTICACHE_ENDPOINT'])
     # wait password propagation
     wait_for_user_be_active("testSecret", elasticache_service_client, user_context["resource"], secret_arn)
     logger.info("testSecret: User %s is active in elasticache after password update for secret arn %s." % (current_secret["user_arn"], secret_arn))

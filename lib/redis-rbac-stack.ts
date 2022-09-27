@@ -28,7 +28,7 @@ import {
   Duration} from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import path = require('path');
-import { RedisRbacUser } from  "./redis-rbac-secret-manager";
+import { RedisRbacUser } from  "./elasticache_user";
 
 import fs = require('fs');
 
@@ -99,7 +99,29 @@ export class RedisRbacStack extends cdk.Stack {
       open: false,
       securityGroups: [secretsManagerVpcEndpointSecurityGroup]
     });
+    
 
+    const elasticacheVpcEndpointSecurityGroup = new ec2.SecurityGroup(this, 'elasticacheVPCSG', {
+      vpc: vpc,
+      description: 'SecurityGroup for the VPC Endpoint Secrets Manager',
+      allowAllOutbound: false,
+
+    });
+
+    elasticacheVpcEndpointSecurityGroup.connections.allowFrom(lambdaSecurityGroup, ec2.Port.tcp(443));
+
+    const elasticacheVpcEndpoint = new ec2.InterfaceVpcEndpoint(this, 'ElastiCache VPC Endpoint', {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService('com.amazonaws.'+cdk.Stack.of(this).region+'.elasticache', 443),
+      privateDnsEnabled: true,
+      open: true,
+      subnets: {
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+      },
+      securityGroups:[elasticacheVpcEndpointSecurityGroup]
+    });
+
+    
     const ecSecurityGroup = new ec2.SecurityGroup(this, 'ElastiCacheSG', {
       vpc: vpc,
       description: 'SecurityGroup associated with the ElastiCache Redis Cluster',
@@ -109,6 +131,7 @@ export class RedisRbacStack extends cdk.Stack {
     ecSecurityGroup.connections.allowFrom(lambdaSecurityGroup, ec2.Port.tcp(6379), 'Redis ingress 6379');
     ecSecurityGroup.connections.allowTo(lambdaSecurityGroup, ec2.Port.tcp(6379), 'Redis egress 6379');
 
+    
     // ------------------------------------------------------------------------------------
     // Step 2) Create IAM roles
     //     a) each IAM role will be assumed by a lambda function
@@ -149,6 +172,7 @@ export class RedisRbacStack extends cdk.Stack {
       subnetIds: isolatedSubnets,
       cacheSubnetGroupName: 'RedisSubnetGroup'
     });
+
     // ------------------------------------------------------------------------------------
     // Step 3) Create Redis RBAC users
     //     a) access strings will dictate operations that can be performed
@@ -166,12 +190,8 @@ export class RedisRbacStack extends cdk.Stack {
       accessString: 'on ~* -@all +SET',
       kmsKey: commonKmsKey,
       principals: [producerRole],
-      redisRbacRotatorProps: {
-        vpc,
-        subnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
-        securityGroups: [ecSecurityGroup],
-        rotationSchedule: Duration.days(30)
-      }
+      elasticacheVpcEndpoint: elasticacheVpcEndpoint,
+      secretsManagerVpcEndpoint: secretsManagerEndpoint
     });
 
     const consumerRbacUser = new RedisRbacUser(this, consumerName+'RBAC', {
@@ -179,13 +199,24 @@ export class RedisRbacStack extends cdk.Stack {
       redisUserId: 'consumer',
       accessString: 'on ~* -@all +GET',
       kmsKey: commonKmsKey,
-      principals: [consumerRole]
+      principals: [consumerRole],
+      elasticacheVpcEndpoint: elasticacheVpcEndpoint,
+      secretsManagerVpcEndpoint: secretsManagerEndpoint
     });
+
+    producerRbacUser.setSecretRotator({
+      vpc,
+      subnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
+      rotationSchedule: Duration.days(30),
+      rotatorTimeoutSeconds: 600
+    })
 
     const groupDefaultRbacUser = new RedisRbacUser(this, "groupDefaultUser"+'RBAC', {
       redisUserName: 'default',
       redisUserId: 'groupdefaultuser',
-      kmsKey: commonKmsKey
+      kmsKey: commonKmsKey,
+      elasticacheVpcEndpoint: elasticacheVpcEndpoint,
+      secretsManagerVpcEndpoint: secretsManagerEndpoint
     });
 
     // Create RBAC user group
