@@ -25,65 +25,53 @@ import {
   aws_elasticache as elasticache, 
   aws_secretsmanager as secretsmanager,
   Duration} from 'aws-cdk-lib';
-import { ISubnet } from 'aws-cdk-lib/aws-ec2';
-import { PropagatedTagSource } from 'aws-cdk-lib/aws-ecs';
 import { Construct } from 'constructs';
-import internal = require('events');
 import path = require('path');
-import { print } from 'util';
 
 export interface RedisRbacUserProps {
+  /** Redis Username that will be used in as ElastiCache user's username -- used to authenticate against Redis RBAC */
   redisUserName: string;
+  /** User ID that will be used as the ElastiCache user's ID */
   redisUserId: string;
+  /** Redis RBAC Access String see {@link https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/Clusters.RBAC.html} for details*/
   accessString?: string;
+  /** Optional: AWS KMS key used to encrypt the password secret; if not supplied one will be created */
   kmsKey?: kms.Key;
+  /** Optional: A list of iam.IPrincipal that will be granted read access to the username and password stored in Secrets Manager*/
   principals?: iam.IPrincipal[];
+  /** Optional: Secret rotation properties, see {@link SecretRotatorProps} */
   secretRotatorProps?: SecretRotatorProps;
-  elasticacheVpcEndpoint?: ec2.InterfaceVpcEndpoint;
+  /** Optional: The ElastiCache VPC endpoint to connect to -- required if resources are to be placed in a private-isolated subnet */
+  elasticacheVpcEndpoint?: ec2.InterfaceVpcEndpoint; 
+  /** Optional: The ElastiCache VPC endpoint to connect to -- required if resources are to be placed in a private-isolated subnet */
   secretsManagerVpcEndpoint?: ec2.InterfaceVpcEndpoint;
 }
 
 export interface SecretRotatorProps {
+  /** The VPC where the rotator Lambda function will be deployed */
   vpc: ec2.Vpc;
-  subnets: ec2.SubnetSelection
-  rotationSchedule: Duration;
-  elasticacheReplicationGroup?: elasticache.CfnReplicationGroup;
-  rotatorSecurityGroups?: ec2.SecurityGroup[];
-  redisPyLayer?: lambda.LayerVersion;
-  rotatorRole?: iam.Role;
+  /** Subnets into which the rotator Lambda functions will be placed */
+  subnetSelection: ec2.SubnetSelection
+  /** The amount of time between automatic rotations */
+  rotationPeriod: Duration;
+  /** The rotator Lambda timeout in number of seconds -- limit is 15 minutes (900 seconds) */
   rotatorTimeoutSeconds?: number
 }
 
 export class RedisRbacUser extends Construct {
-  public readonly response: string;
-
+  
   private rbacUserSecret: secretsmanager.Secret;
-  private secretResourcePolicyStatement: iam.PolicyStatement;
-  private secretsManagerVpcResourcePolicyStatement: iam.PolicyStatement;
   private rbacUserName: string;
   private rbacUserId: string;
+
   private kmsKey: kms.Key;
-  private readerPrincipals: iam.IPrincipal[] = []
+  private secretResourcePolicyStatement: iam.PolicyStatement;
+  
   private secretsManagerVpcEndpoint: ec2.InterfaceVpcEndpoint;
+  private secretsManagerVpcResourcePolicyStatement: iam.PolicyStatement;
+  
   private elasticacheVpcEndpoint: ec2.InterfaceVpcEndpoint;
   private secretsManagerVpcEndpointPolicyAdded = false
-
-  public getSecret(): secretsmanager.Secret {
-    return this.rbacUserSecret;
-  }
-
-  public getUserName(): string {
-    return this.rbacUserName;
-  }
-
-  public getUserId(): string{
-    return this.rbacUserId;
-  }
-
-  public getKmsKey(): kms.Key {
-    return this.kmsKey;
-  }
-
 
   constructor(scope: Construct, id: string, props: RedisRbacUserProps) {
     super(scope, id);
@@ -138,11 +126,26 @@ export class RedisRbacUser extends Construct {
     }
 
     if(props.secretRotatorProps){
-      this.setSecretRotator(props.secretRotatorProps)
+      this.setSecretRotation(props.secretRotatorProps)
     }
 
   };
 
+  public getSecret(): secretsmanager.Secret {
+    return this.rbacUserSecret;
+  }
+
+  public getUserName(): string {
+    return this.rbacUserName;
+  }
+
+  public getUserId(): string{
+    return this.rbacUserId;
+  }
+
+  public getKmsKey(): kms.Key {
+    return this.kmsKey;
+  }
 
   public grantReadSecret(principal: iam.IPrincipal){
     if (this.secretsManagerVpcResourcePolicyStatement == null){
@@ -177,21 +180,14 @@ export class RedisRbacUser extends Construct {
     this.rbacUserSecret.grantRead(principal)
   }
 
-  public setSecretRotator(secretRotatorProps:SecretRotatorProps){
+  public setSecretRotation(secretRotatorProps:SecretRotatorProps){
     var rotatorRole: iam.Role;
-    var rotatorTimeoutSeconds = secretRotatorProps.rotatorTimeoutSeconds ? secretRotatorProps.rotatorTimeoutSeconds: 30
+    var rotatorTimeoutSeconds = secretRotatorProps.rotatorTimeoutSeconds ? secretRotatorProps.rotatorTimeoutSeconds: 900
 
     const rotatorSecurityGroup = new ec2.SecurityGroup(this, "RotatorSG", {
       vpc: secretRotatorProps.vpc,
       description: "SecurityGroup for rotator function",
     });
-
-    // Mirus: do I need to do this?
-    rotatorSecurityGroup.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.allTraffic(),
-      "All port inbound"
-    );
 
     rotatorRole = new iam.Role(this, "secret_rotator_role", {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -257,7 +253,7 @@ export class RedisRbacUser extends Construct {
 
     this.rbacUserSecret.addRotationSchedule(this.rbacUserName+"_rotation_schedule", {
       rotationLambda: rotatorFunction,
-      automaticallyAfter: secretRotatorProps.rotationSchedule, 
+      automaticallyAfter: secretRotatorProps.rotationPeriod, 
     })
 
     if(this.elasticacheVpcEndpoint){
@@ -277,9 +273,7 @@ export class RedisRbacUser extends Construct {
       )
     }
 
-    console.log("doesnsecretsmanager endpoint exist??"+String(this.secretsManagerVpcEndpoint))
     if(this.secretsManagerVpcEndpoint){
-      console.log("secretsmanager endpoint exists")
       this.secretsManagerVpcEndpoint.connections.allowTo(rotatorSecurityGroup, ec2.Port.tcp(443));
       this.secretsManagerVpcEndpoint.connections.allowFrom(rotatorSecurityGroup, ec2.Port.tcp(443));
       

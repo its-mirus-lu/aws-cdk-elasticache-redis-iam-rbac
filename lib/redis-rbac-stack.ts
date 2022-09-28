@@ -28,7 +28,7 @@ import {
   Duration} from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import path = require('path');
-import { RedisRbacUser } from  "./elasticache_user";
+import { RedisRbacUser } from  "./elasticache-user";
 
 import fs = require('fs');
 
@@ -204,10 +204,10 @@ export class RedisRbacStack extends cdk.Stack {
       secretsManagerVpcEndpoint: secretsManagerEndpoint
     });
 
-    producerRbacUser.setSecretRotator({
+    producerRbacUser.setSecretRotation({
       vpc,
-      subnets: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
-      rotationSchedule: Duration.days(30),
+      subnetSelection: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
+      rotationPeriod: Duration.days(30),
       rotatorTimeoutSeconds: 600
     })
 
