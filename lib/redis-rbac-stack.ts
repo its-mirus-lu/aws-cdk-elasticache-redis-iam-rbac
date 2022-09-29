@@ -208,7 +208,14 @@ export class RedisRbacStack extends cdk.Stack {
       vpc,
       subnetSelection: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
       rotationPeriod: Duration.days(30),
-      rotatorTimeoutSeconds: 600
+      rotatorTimeoutSeconds: 900
+    })
+
+    consumerRbacUser.setSecretRotation({
+      vpc,
+      subnetSelection: {subnetType: ec2.SubnetType.PRIVATE_ISOLATED},
+      rotationPeriod: Duration.days(25),
+      rotatorTimeoutSeconds: 900
     })
 
     const groupDefaultRbacUser = new RedisRbacUser(this, "groupDefaultUser"+'RBAC', {
@@ -270,7 +277,7 @@ export class RedisRbacStack extends cdk.Stack {
     // ------------------------------------------------------------------------------------
     const redisPyLayer = new lambda.LayerVersion(this, 'redispy_Layer', {
       code: lambda.Code.fromAsset(path.join(__dirname, 'lambda/lib/redis_module/redis_py.zip')),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_8, lambda.Runtime.PYTHON_3_7, lambda.Runtime.PYTHON_3_6],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_8, lambda.Runtime.PYTHON_3_9, lambda.Runtime.PYTHON_3_7],
       description: 'A layer that contains the redispy module',
       license: 'MIT License'
     });

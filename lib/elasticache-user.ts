@@ -25,8 +25,10 @@ import {
   aws_elasticache as elasticache, 
   aws_secretsmanager as secretsmanager,
   Duration} from 'aws-cdk-lib';
+import { IPrincipal } from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import path = require('path');
+
 
 export interface RedisRbacUserProps {
   /** Redis Username that will be used in as ElastiCache user's username -- used to authenticate against Redis RBAC */
@@ -59,19 +61,34 @@ export interface SecretRotatorProps {
 }
 
 export class RedisRbacUser extends Construct {
-  
+
+  /** The Amazon Secrets Manager Secret that will store the ElastiCache user credentials */
   private rbacUserSecret: secretsmanager.Secret;
+
+  /** ElastiCache username that will be used in the CfnUser construct */
   private rbacUserName: string;
+
+  /** ElastiCache user id that will be used in the CfnUser construct */
   private rbacUserId: string;
 
+  /** AWS KMS key used to encrypt the secret */
   private kmsKey: kms.Key;
-  private secretResourcePolicyStatement: iam.PolicyStatement;
-  
+
+  // Endpoint definitions
   private secretsManagerVpcEndpoint: ec2.InterfaceVpcEndpoint;
-  private secretsManagerVpcResourcePolicyStatement: iam.PolicyStatement;
-  
   private elasticacheVpcEndpoint: ec2.InterfaceVpcEndpoint;
-  private secretsManagerVpcEndpointPolicyAdded = false
+
+  // Policy statements
+  private secretResourceReadPolicyStatement: iam.PolicyStatement;
+
+  private secretsManagerVpcEndpointReadPolicyStatement: iam.PolicyStatement;
+  private secretsManagerReadVpcEndpointPolicyAdded = false
+
+  private secretsManagerVpcEndpointReadWritePolicyStatement: iam.PolicyStatement;
+  private secretsManagerReadWriteVpcEndpointPolicyAdded: boolean = false;
+  
+  private elasticacheVpcEndpointModifyUserPolicyStatement: iam.PolicyStatement;
+  private elasticacheVpcEndpointStatementAdded: boolean = false;
 
   constructor(scope: Construct, id: string, props: RedisRbacUserProps) {
     super(scope, id);
@@ -88,14 +105,17 @@ export class RedisRbacUser extends Construct {
     }
     
     
-    
     if (!props.kmsKey) {
+      
       this.kmsKey = new kms.Key(this, 'kmsForSecret', {
         alias: 'redisRbacUser/'+this.rbacUserName,
         enableKeyRotation: true
       });
+
     } else {
+      
       this.kmsKey = props.kmsKey;
+
     }
 
     this.rbacUserSecret = new secretsmanager.Secret(this, 'secret', {
@@ -120,7 +140,7 @@ export class RedisRbacUser extends Construct {
     user.node.addDependency(this.rbacUserSecret)
 
     if(props.principals){
-      props.principals.forEach( (item) => {
+      props.principals.forEach((item) => {
           this.grantReadSecret(item)
       });
     }
@@ -128,7 +148,6 @@ export class RedisRbacUser extends Construct {
     if(props.secretRotatorProps){
       this.setSecretRotation(props.secretRotatorProps)
     }
-
   };
 
   public getSecret(): secretsmanager.Secret {
@@ -147,48 +166,146 @@ export class RedisRbacUser extends Construct {
     return this.kmsKey;
   }
 
-  public grantReadSecret(principal: iam.IPrincipal){
-    if (this.secretsManagerVpcResourcePolicyStatement == null){
-      this.secretsManagerVpcResourcePolicyStatement = new iam.PolicyStatement({
+  private grantReadThroughSecretManagerVpcEndpoint(principal: IPrincipal){
+
+    if (this.secretsManagerVpcEndpointReadPolicyStatement == null){
+
+      this.secretsManagerVpcEndpointReadPolicyStatement = new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+        resources: [this.rbacUserSecret.secretArn],
+        principals: [principal]
+      })
+
+    } else {
+
+      this.secretsManagerVpcEndpointReadPolicyStatement.addPrincipals(principal)
+
+    }
+
+    if(this.secretsManagerVpcEndpoint && !this.secretsManagerReadVpcEndpointPolicyAdded){
+
+      this.secretsManagerVpcEndpoint.addToPolicy(this.secretsManagerVpcEndpointReadPolicyStatement)
+      this.secretsManagerReadVpcEndpointPolicyAdded = true
+
+    }
+  }
+
+  private grantReadWriteThroughSecretManagerVpcEndpoint(principal: IPrincipal){
+
+    if (this.secretsManagerVpcEndpointReadWritePolicyStatement == null){
+
+      this.secretsManagerVpcEndpointReadWritePolicyStatement = new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:UpdateSecretVersionStage', 'secretsmanager:PutSecretValue', 'secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
         resources: [this.rbacUserSecret.secretArn],
         principals: [principal]
       })
       
-      if(this.secretsManagerVpcEndpoint){
-        this.secretsManagerVpcEndpoint.addToPolicy(this.secretsManagerVpcResourcePolicyStatement)
-        this.secretsManagerVpcEndpointPolicyAdded = true
-      }
     } else {
-      this.secretsManagerVpcResourcePolicyStatement.addPrincipals(principal)
+
+      this.secretsManagerVpcEndpointReadWritePolicyStatement.addPrincipals(principal)
+
     }
+
+    if(this.secretsManagerVpcEndpoint && !this.secretsManagerReadWriteVpcEndpointPolicyAdded){
+
+      this.secretsManagerVpcEndpoint.addToPolicy(this.secretsManagerVpcEndpointReadWritePolicyStatement)
+      this.secretsManagerReadVpcEndpointPolicyAdded = true
+
+    }
+  }
+
+  private grantModifyUserThroughElastiCacheVpcEndpoint(principal: IPrincipal){
     
-    if (this.secretResourcePolicyStatement == null) {
-      this.secretResourcePolicyStatement = new iam.PolicyStatement({
+    if (this.elasticacheVpcEndpointModifyUserPolicyStatement == null){
+
+      this.elasticacheVpcEndpointModifyUserPolicyStatement = new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        resources: ["arn:aws:elasticache:"+cdk.Stack.of(this).region+":"+cdk.Stack.of(this).account+":user:"+this.rbacUserId],
+        actions: [
+          "elasticache:DescribeUsers",
+          "elasticache:ModifyUser"
+        ],
+        principals: [principal]
+      })
+
+    }
+    else{
+
+      this.elasticacheVpcEndpointModifyUserPolicyStatement.addPrincipals(principal)
+
+    }
+
+    if(this.elasticacheVpcEndpoint && !this.elasticacheVpcEndpointStatementAdded){
+
+      this.elasticacheVpcEndpoint.addToPolicy(this.elasticacheVpcEndpointModifyUserPolicyStatement)
+      this.elasticacheVpcEndpointStatementAdded = true
+
+    }  
+  }
+
+  public grantReadSecret(principal: iam.IPrincipal){
+    
+    this.grantReadThroughSecretManagerVpcEndpoint(principal)
+    
+    if (this.secretResourceReadPolicyStatement == null) {
+
+      this.secretResourceReadPolicyStatement = new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
         resources: [this.rbacUserSecret.secretArn],
         principals: [principal]
       })
-      this.rbacUserSecret.addToResourcePolicy(this.secretResourcePolicyStatement)
+
+      this.rbacUserSecret.addToResourcePolicy(this.secretResourceReadPolicyStatement)
+      
     } else {
-      this.secretResourcePolicyStatement.addPrincipals(principal)
+      this.secretResourceReadPolicyStatement.addPrincipals(principal)
     }
 
     this.kmsKey.grantDecrypt(principal);
     this.rbacUserSecret.grantRead(principal)
   }
 
+  private grantReadWriteSecret(principal: iam.IPrincipal){
+    
+    this.grantReadWriteThroughSecretManagerVpcEndpoint(principal)
+    
+    if (this.secretResourceReadPolicyStatement == null) {
+
+      this.secretResourceReadPolicyStatement = new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:UpdateSecretVersionStage', 'secretsmanager:PutSecretValue', 'secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+        resources: [this.rbacUserSecret.secretArn],
+        principals: [principal]
+      })
+
+      this.rbacUserSecret.addToResourcePolicy(this.secretResourceReadPolicyStatement)
+
+    } else {
+
+      this.secretResourceReadPolicyStatement.addPrincipals(principal)
+
+    }
+
+    this.kmsKey.grantEncryptDecrypt(principal)
+
+    this.rbacUserSecret.grantRead(principal)
+    this.rbacUserSecret.grantWrite(principal)
+  }
+
   public setSecretRotation(secretRotatorProps:SecretRotatorProps){
     var rotatorRole: iam.Role;
     var rotatorTimeoutSeconds = secretRotatorProps.rotatorTimeoutSeconds ? secretRotatorProps.rotatorTimeoutSeconds: 900
 
+    // Security group for the Rotator function
     const rotatorSecurityGroup = new ec2.SecurityGroup(this, "RotatorSG", {
       vpc: secretRotatorProps.vpc,
       description: "SecurityGroup for rotator function",
     });
 
+    // Rotator function's role
     rotatorRole = new iam.Role(this, "secret_rotator_role", {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       description: 'Role to be assumed by secret rotator function for '+this.rbacUserName,
@@ -196,6 +313,7 @@ export class RedisRbacUser extends Construct {
 
     rotatorRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"));
     rotatorRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
+
     rotatorRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -230,6 +348,7 @@ export class RedisRbacUser extends Construct {
       })
     );
     
+    // The rotator function
     const rotatorFunction = new lambda.Function(this, 'rotator', {
       runtime: lambda.Runtime.PYTHON_3_7,
       handler: 'lambda_handler.lambda_handler',
@@ -248,48 +367,25 @@ export class RedisRbacUser extends Construct {
       }
     });
 
-    this.rbacUserSecret.grantRead(rotatorRole)
-    this.rbacUserSecret.grantWrite(rotatorRole)
+    this.grantReadWriteSecret(rotatorRole)
 
     this.rbacUserSecret.addRotationSchedule(this.rbacUserName+"_rotation_schedule", {
       rotationLambda: rotatorFunction,
       automaticallyAfter: secretRotatorProps.rotationPeriod, 
     })
 
+    // If an ElastiCache VPC endpoint is defined, then configure it to accept a connection from the rotator security group
     if(this.elasticacheVpcEndpoint){
       this.elasticacheVpcEndpoint.connections.allowTo(rotatorSecurityGroup, ec2.Port.tcp(443));
       this.elasticacheVpcEndpoint.connections.allowFrom(rotatorSecurityGroup, ec2.Port.tcp(443));
-      
-      this.elasticacheVpcEndpoint.addToPolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          resources: ["arn:aws:elasticache:"+cdk.Stack.of(this).region+":"+cdk.Stack.of(this).account+":user:"+this.rbacUserId],
-          actions: [
-            "elasticache:DescribeUsers",
-            "elasticache:ModifyUser"
-          ],
-          principals: [rotatorRole]
-        })
-      )
+      this.grantModifyUserThroughElastiCacheVpcEndpoint(rotatorRole)
     }
 
+    // If an Secrets Manager VPC endpoint is defined, then configure it to accept a connection from the rotator security group
     if(this.secretsManagerVpcEndpoint){
       this.secretsManagerVpcEndpoint.connections.allowTo(rotatorSecurityGroup, ec2.Port.tcp(443));
       this.secretsManagerVpcEndpoint.connections.allowFrom(rotatorSecurityGroup, ec2.Port.tcp(443));
-      
-      this.secretsManagerVpcEndpoint.addToPolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          resources: [this.rbacUserSecret.secretArn],
-          actions: [
-            "secretsmanager:DescribeSecret",
-            "secretsmanager:GetSecretValue",
-            "secretsmanager:PutSecretValue",
-            "secretsmanager:UpdateSecretVersionStage",
-          ],
-          principals: [rotatorRole]
-        })
-      );
+      this.grantReadWriteThroughSecretManagerVpcEndpoint(rotatorRole)
       
       this.secretsManagerVpcEndpoint.addToPolicy(
         new iam.PolicyStatement({
@@ -300,12 +396,7 @@ export class RedisRbacUser extends Construct {
           ],
           principals: [rotatorRole]
         })
-      );
-
-      if (!this.secretsManagerVpcEndpointPolicyAdded){
-        this.secretsManagerVpcEndpoint.addToPolicy(this.secretsManagerVpcResourcePolicyStatement)
-        this.secretsManagerVpcEndpointPolicyAdded = true
-      }
+      )
     }
   }
 }
